@@ -1,0 +1,24 @@
+FROM postgres:16 AS build
+ENV POSTGRES_HOST_AUTH_METHOD=trust
+ENV PGDATA=/data
+RUN apt-get update \
+    && apt-get install wget -y \
+    && apt-get -m install postgresql-16-postgis-3 postgis -y || true
+COPY install-a.sql /docker-entrypoint-initdb.d
+COPY install-b.sql /docker-entrypoint-initdb.d
+COPY install-c.sql /docker-entrypoint-initdb.d
+COPY install-d.sql /docker-entrypoint-initdb.d
+RUN ["sed", "-i", "s/exec \"$@\"/echo \"skipping...\"/", "/usr/local/bin/docker-entrypoint.sh"]
+RUN chmod 775 -R /docker-entrypoint-initdb.d
+RUN ["/usr/local/bin/docker-entrypoint.sh", "postgres"]
+
+FROM postgres:16
+EXPOSE 5432
+RUN apt-get update \
+    && apt-get install wget -y \
+    && apt-get -m install postgresql-16-postgis-3 postgis -y || true
+RUN uname -m > /arch
+COPY --from=build /data /var/lib/postgresql/data
+COPY docker-init.sh /usr/local/bin
+COPY docker-reconfigure.sh /usr/local/bin
+CMD ["docker-init.sh"]

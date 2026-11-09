@@ -1,0 +1,124 @@
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:2.8.1
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+    _PIP_ADDITIONAL_REQUIREMENTS: "--prefer-binary apache-airflow-providers-amazon boto3 duckdb"
+    AIRFLOW_CONN_SEAWEEDFS_S3: "aws://${SEAWEED_ACCESS_KEY}:${SEAWEED_SECRET_KEY}@/?endpoint_url=http%3A%2F%2Fseaweedfs%3A8333&addressing_style=path"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID}:0"
+  depends_on:
+    postgres:
+      condition: service_started
+    airflow-init:
+      condition: service_completed_successfully
+  networks:
+    - s3net
+
+services:
+  # 1. Airflow Metadata DB
+  postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    networks:
+      - s3net
+
+  # 2. Airflow DB Init (Menyiapkan skema DB dan user admin)
+  airflow-init:
+    image: apache/airflow:2.8.1
+    environment:
+      <<: *airflow-common-env
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    user: "${AIRFLOW_UID}:0"
+    depends_on:
+      - postgres
+    networks:
+      - s3net
+    command: bash -c "airflow db migrate && airflow users create \
+      --username admin \
+      --password admin \
+      --firstname Admin \
+      --lastname User \
+      --role Admin \
+      --email admin@example.com"
+
+  # 3. Airflow Webserver
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # 4. Airflow Scheduler
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+
+  # 5. SeaweedFS Lakehouse Storage
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.68
+    container_name: seaweedfs
+    command: >
+      server
+      -s3
+      -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -master.volumeSizeLimitMB=100
+      -volume.max=10
+      -dir=/data
+    ports:
+      - "8333:8333"
+      - "9333:9333"
+    volumes:
+      - seaweedfs_data:/data
+      - ./config/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD", "weed", "version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - s3net
+
+  # 6. SeaweedFS Init Bucket
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:3.68
+    container_name: seaweedfs-init
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command: ["-c", "echo 's3.bucket.create -name adventure-bucket' | weed shell -master=seaweedfs:9333 && echo 'SeaweedFS bucket created'"]
+    networks:
+      - s3net
+
+volumes:
+  postgres-db-volume:
+  seaweedfs_data:
+
+networks:
+  s3net:
+    driver: bridge
