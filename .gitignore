@@ -1,4 +1,5 @@
 # Log & Database Lokal
+config/s3.json
 logs/
 *.duckdb
 *.duckdb.wal
